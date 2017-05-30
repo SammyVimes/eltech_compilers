@@ -40,6 +40,8 @@ module Interpret =
       | [] -> failwith "Stack machine.Find ip: Unknown label"
       | i::code' -> if i = LABEL lbl then 0 else  1 + find_ip lbl code'
 
+    let update st x v = fun y -> if y = x then v else st y 
+
     let run prg input =
       let rec run' prg ((stack, st, input, output, ip) as conf) =
         if ip >= (List.length prg)

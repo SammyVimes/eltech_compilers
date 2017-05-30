@@ -7,12 +7,21 @@ module Expr =
     open Expr
     open Language.BinOp
 
-    let rec eval expr st = 
-      let eval' e = eval e st in
+    let rec eval feval expr st = 
+      let eval' e = eval feval e st in
       match expr with
-      | Var   x     -> st x
-      | Const z     -> z
-      | Binop  (op, x, y) -> (apply op) (eval' x) (eval' y)
+      | Var   x     -> (st x, [])
+      | Const z     -> (z, [])
+      | Binop  (op, x, y) -> 
+        let (xv, xout) = eval' x in
+        let (yv, yout) = eval' y in
+        ((apply op) xv yv, xout @ yout)
+      | Call (f, args) ->
+       let args' = List.map (fun arg -> eval feval arg st) args in
+       let args'' = List.map (fun (a, _) -> a) args' in
+       let output = List.fold_left (fun l (_, out) -> l @ out) [] args' in
+       let (res, eval_output) = feval f args'' in
+       (res, output @ eval_output)
 
   end
 
@@ -21,22 +30,46 @@ module Stmt =
   struct
 
     open Stmt
-
-    (* State update primitive *) 
-    let update st x v = fun y -> if y = x then v else st y 
       
-    let rec eval stmt ((st, input, output) as conf) =
+    let rec eval stmt ((conf, input, output) as c) =
+      let (fenv, state) = conf in 
+      let feval f args = 
+            let fenv' x = List.assoc x fenv in
+            let (fargs, fbody) = fenv' f in
+            let state'' = List.map2 (fun ident arg -> (ident, arg)) fargs args in
+            let (_, _, eout) = eval fbody ((fenv, state''), input, []) in
+            (match eout with
+             | []   -> failwith "Function should return a value"
+             | eout -> let res::rout = List.rev eout in 
+                       (res, List.rev rout))
+      in
+      let st x = List.assoc x state in
       match stmt with
-      | Skip          -> conf
-      | Assign (x, e) -> (update st x (Expr.eval e st), input, output)
-      | Write   e     -> (st, input, output @ [Expr.eval e st])
-      | Seq (s1, s2)  -> eval s1 conf |> eval s2 
+      | Write   e     ->
+        let (eres, eout) = Expr.eval feval e st in
+        (conf, input, output @ eout @ [eres])
+      | Skip          -> c
+      | Seq (Return e, _) -> eval (Return e) c
+      | Seq (s1, s2)  -> eval s1 c |> eval s2 
+      | Assign (x, e) -> 
+        let (eres, eout) = Expr.eval feval e st in
+        ((fenv, (x, eres) :: state), input, output @ eout)
       | Read    x     -> 
-	  let z :: input' = input in
-	  (update st x z, input', output)
-      | If (e, s1, s2) -> if (Expr.eval e st) <> 0 then (eval s1 conf) else (eval s2 conf)
+	    let z :: input' = input in
+	    ((fenv, (x, z) :: state), input', output)
+      | If (e, s1, s2) -> 
+        let (eres, eout) = Expr.eval feval e st in
+        if (eres) <> 0 then (eval s1 (conf, input, output @ eout)) else (eval s2 (conf, input, output @ eout))
       (*eval self again but with new conf (which is eval'ed body of while')*)
-      | While (e, s)   -> if (Expr.eval e st) <> 0 then eval stmt (eval s conf) else conf
+      | While (e, s)   -> 
+        let (eres, eout) = Expr.eval feval e st in
+        let c' = (conf, input, output @ eout) in
+        if (eres) <> 0 then eval stmt (eval s c') else c'
+      | Fun (fname, fargs, fbody) -> 
+        ((((fname, (fargs, fbody))::fenv), state), input, output)
+      | Return e -> 
+        let (eres, eout) = Expr.eval feval e st in
+        (conf, input, output @ eout @ [eres])
 
   end
 
@@ -45,7 +78,7 @@ module Program =
 
     let eval p input = 
       let (_, _, output) = 
-	Stmt.eval p ((fun _ -> failwith "undefined variable"), input, []) 
+	Stmt.eval p (([], []), input, []) 
       in
       output
 
